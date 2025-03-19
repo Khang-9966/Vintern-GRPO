@@ -1,0 +1,9 @@
+{
+  "coco_karpathy_train_567k": {
+    "root": "/data/llm/R1/InternVL/",
+    "annotation": "/data/llm/R1/InternVL/clevr_cogen_a_train_30k/clevr_cogen_a_train.jsonl",
+    "data_augment": false,
+    "repeat_time": 1,
+    "length": 566747
+  }
+}
