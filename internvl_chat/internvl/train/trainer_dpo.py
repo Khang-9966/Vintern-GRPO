@@ -13,6 +13,18 @@ from torch import nn
 from torch.utils.data import ConcatDataset
 from trl import DPOTrainer
 from trl.trainer.utils import RunningMoments, pad_to_length
+from trl.trainer.utils import (
+    DPODataCollatorWithPadding,
+    add_bos_token_if_needed,
+    add_eos_token_if_needed,
+    disable_dropout_in_model,
+    generate_model_card,
+    get_comet_experiment_url,
+    log_table_to_comet_experiment,
+    pad_to_length,
+    peft_module_casting_to_bf16,
+    selective_log_softmax,
+)
 
 
 def _map(self, *args, **kwargs):
@@ -143,7 +155,45 @@ class MultimodalDPOTrainer(DPOTrainer):
             is_encoder_decoder=self.is_encoder_decoder,
             label_pad_token_id=self.label_pad_token_id,
         )
+        
+    @staticmethod
+    def get_batch_logps(
+        logits: torch.FloatTensor,
+        labels: torch.LongTensor,
+        average_log_prob: bool = False,
+        label_pad_token_id: int = -100,
+        is_encoder_decoder: bool = False,
+    ) -> torch.FloatTensor:
+        """Compute the log probabilities of the given labels under the given logits.
 
+        Args:
+            logits: Logits of the model (unnormalized). Shape: (batch_size, sequence_length, vocab_size)
+            labels: Labels for which to compute the log probabilities. Label tokens with a value of label_pad_token_id are ignored. Shape: (batch_size, sequence_length)
+            average_log_prob: If True, return the average log probability per (non-masked) token. Otherwise, return the sum of the log probabilities of the (non-masked) tokens.
+            label_pad_token_id: The label pad token id.
+            is_encoder_decoder: Whether the model is an encoder-decoder model.
+
+        Returns:
+            A tensor of shape (batch_size,) containing the average/sum log probabilities of the given labels under the given logits.
+        """
+        if logits.shape[:-1] != labels.shape:
+            raise ValueError("Logits (batch and sequence length dim) and labels must have the same shape.")
+
+        if not is_encoder_decoder:
+            labels = labels[:, 1:].clone()
+            logits = logits[:, :-1, :]
+        loss_mask = labels != label_pad_token_id
+
+        # dummy token; we'll ignore the losses on these tokens later
+        labels = torch.where(labels == label_pad_token_id, 0, labels)
+
+        per_token_logps = selective_log_softmax(logits, labels)
+
+        if average_log_prob:
+            return (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
+        else:
+            return (per_token_logps * loss_mask).sum(-1)
+            
         def cross_entropy_loss(logits, labels):
             if not self.is_encoder_decoder:
                 # Shift so that tokens < n predict n

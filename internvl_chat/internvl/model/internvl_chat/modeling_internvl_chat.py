@@ -395,8 +395,9 @@ class InternVLChatModel(PreTrainedModel):
             if verbose:
                 print(query_to_print, response)
             return response
-
+            
     @torch.no_grad()
+    @torch.inference_mode()
     def generate(
             self,
             pixel_values: Optional[torch.FloatTensor] = None,
@@ -405,15 +406,17 @@ class InternVLChatModel(PreTrainedModel):
             visual_features: Optional[torch.FloatTensor] = None,
             generation_config: Optional[GenerationConfig] = None,
             output_hidden_states: Optional[bool] = None,
+            image_flags: Optional[torch.LongTensor] = None,
             **generate_kwargs,
     ) -> torch.LongTensor:
-
+        from trl.models import create_reference_model, prepare_deepspeed, unwrap_model_for_generation
         assert self.img_context_token_id is not None
         if pixel_values is not None:
             if visual_features is not None:
                 vit_embeds = visual_features
             else:
                 vit_embeds = self.extract_feature(pixel_values)
+
             input_embeds = self.language_model.get_input_embeddings()(input_ids)
             B, N, C = input_embeds.shape
             input_embeds = input_embeds.reshape(B * N, C)
@@ -432,11 +435,12 @@ class InternVLChatModel(PreTrainedModel):
             attention_mask=attention_mask,
             generation_config=generation_config,
             output_hidden_states=output_hidden_states,
-            use_cache=True,
+            use_cache=False,
             **generate_kwargs,
         )
 
         return outputs
+        
 
     @property
     def lm_head(self):

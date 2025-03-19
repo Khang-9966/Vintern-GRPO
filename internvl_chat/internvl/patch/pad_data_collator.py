@@ -11,7 +11,7 @@ IGNORE_INDEX = -100
 
 
 def pad_data_collator(features, pad_id=0):
-
+    print('2PIL_image', 'text_query'*100)
     first = features[0]
     batch = {}
 
@@ -55,10 +55,14 @@ def pad_data_collator(features, pad_id=0):
 
 
 def concat_pad_data_collator(features, max_item_length=None, pad_id=0):
-
     first = features[0]
-    batch = {}
+    
+    for feat in features:
+        feat["array_image"] = feat["image_flags"][1]
+        feat["image_flags"] = feat["image_flags"][0]
 
+    batch = {}
+            
     batch_lens = [feat['input_ids'].shape for feat in features]
     max_item_length = max_item_length or max(batch_lens)[0]
     for idx in range(len(features)):
@@ -95,6 +99,11 @@ def concat_pad_data_collator(features, max_item_length=None, pad_id=0):
             dtype = torch.long if isinstance(first['label_ids'][0], int) else torch.float
             batch['labels'] = torch.tensor([f['label_ids'] for f in features], dtype=dtype)
 
+    # # Handling special image fields
+    # if 'array_image' in first and first['array_image'] is not None:
+    #     # Giữ nguyên dạng numpy array và gom vào list
+    #     batch['array_image'] = torch.tensor(np.stack([f['array_image'] for f in features]))
+        
     # Handling of all other possible keys.
     # Again, we will use the first element to figure out which key/values are not None for this model.
     for k, v in first.items():
@@ -113,11 +122,13 @@ def concat_pad_data_collator(features, max_item_length=None, pad_id=0):
                 batch[k] = torch.concat(np.stack([f[k] for f in features]))
             else:
                 batch[k] = torch.concat([f[k] for f in features])
+
     return batch
 
 
 def dpo_concat_pad_data_collator(features, pad_id=0):
-
+    print('1PIL_image', 'text_query'*100)
+    
     first = features[0]
     batch = {}
 
