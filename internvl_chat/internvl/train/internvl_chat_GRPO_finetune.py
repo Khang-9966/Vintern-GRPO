@@ -853,6 +853,40 @@ def accuracy_reward(completions, **kwargs):
 
     return rewards
 
+def soft_accuracy_reward(completions, **kwargs):
+    print("***"*100)
+    print(completions)
+    solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
+    contents = [completion for completion in completions]
+    rewards = []
+
+    for content, sol in zip(contents, solution):
+        # print(content)
+        reward = 0.0    
+        # If symbolic verification failed, try string matching
+        if reward == 0.0:
+            try:
+                ground_truth = sol
+                if "Answer:" in content:
+                    ans =  content.split("Answer:")[-1].repalce(" ","").repalce("\n","")
+                    print("="*10,soft_accuracy_reward,ans)
+                    if ans == ground_truth:
+                        reward = 1.0
+                elif "boxed{" in content:
+                    content_match = re.search(r'boxed{(.*?)}', content)
+                    if content_match is not None:
+                        student_answer = content_match.group(1).strip() #else content.strip()
+                        # Compare the extracted answers
+                        if student_answer == ground_truth:
+                            reward = 1.0
+    
+            except Exception:
+                pass  # Keep reward as 0.0 if both methods fail
+
+        rewards.append(reward)
+
+    return rewards
+
 def count_xml(text) -> float:
     count = 0.0
     if text.count("<reasoning>") == 1:
@@ -876,7 +910,18 @@ def format_reward(completions, **kwargs):
     completion_contents = [completion for completion in completions]
     matches = [re.fullmatch(pattern, content, re.DOTALL) for content in completion_contents]
     return [1.0 if match else 0.0 for match in matches]
-        
+
+def soft_format_reward(completions, **kwargs):
+    rewards = []
+    for completion in completions:
+        score = 0.0
+        if re.search(r"<reasoning>.*?</reasoning>", completion, re.DOTALL):
+            score += 0.5
+        if re.search(r"<answer>.*?</answer>", completion, re.DOTALL):
+            score += 0.5
+        rewards.append(score)
+    return rewards
+    
 def count_math_operations(text) -> float:
     pattern = re.compile(r'[-+*/]')
     count = 0
@@ -1170,26 +1215,34 @@ def main():
         "accuracy": accuracy_reward,
         "format": format_reward,
         "xmlcount_reward": xmlcount_reward_func,
-        "math_reward": math_reward_func
+        "math_reward": math_reward_func,
+        "soft_accuracy_reward": soft_accuracy_reward,
+        "soft_format_reward": soft_format_reward
     }
-    reward_funcs = [reward_funcs_registry[func] for func in ["accuracy",
-                                                             "format",
-                                                             "xmlcount_reward",
-                                                             "math_reward"
+    reward_funcs = [reward_funcs_registry[func] for func in ["format",
+                                                             "soft_format_reward",
+                                                             "accuracy"
                                                             ]]
     training_args.reward_funcs =  reward_funcs
     # from trl import GRPOConfig, GRPOTrainer
 
     training_args.use_vllm = True
     training_args.num_generations = 4
-    training_args.max_prompt_length = 500
-    training_args.max_completion_length = 1200
-    training_args.beta = 0.1
-    training_args.vllm_gpu_memory_utilization = 0.3
-    training_args.temperature = 1.0
+    training_args.max_prompt_length = 400
+    training_args.max_completion_length = 800
+    training_args.beta = 0.01
+    training_args.vllm_gpu_memory_utilization = 0.15
+    training_args.vllm_max_token = 800
+    training_args.temperature = 0.5
     training_args.vllm_device = "cuda:0"
     training_args.model_name_or_path = model_args.model_name_or_path
-    training_args.max_grad_norm = 0.1
+    training_args.max_grad_norm = 0.1 
+    training_args.epsilon_high = 0.3
+    training_args.epsilon_low = 0.3
+    training_args.pad_token_id = 151643
+    training_args.ASSISTENT_TOKEN_ID = 77091
+    training_args.eos_token_id = 151643 #151645
+
     ######################################################################################################################################################################
     trainer = MultimodalGRPOTrainer(
         model=model,

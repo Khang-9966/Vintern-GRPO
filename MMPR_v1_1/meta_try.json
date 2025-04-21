@@ -1,0 +1,10 @@
+{
+    "cocorem_exist_yorn_en_20241016_pairs_vqa_correctness_rules": {
+        "root": "/data/llm/Vintern-7B/internvl_chat/InternVL_Chat_V12_SFT_Data/10percent_data/docvqa/",
+        "annotation": "/data/llm/R1/InternVL/MMPR_v1_1/try_docvqa.jsonl",
+        "data_augment": false,
+        "repeat_time": 1,
+        "length": 6910
+    }
+
+}

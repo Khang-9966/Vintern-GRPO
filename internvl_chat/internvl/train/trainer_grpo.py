@@ -70,7 +70,8 @@ class MultimodalGRPOTrainer(Trainer):
         self._metrics = defaultdict(list)
        
         super().__init__(**model_init_kwargs)
-
+        # self.model_accepts_loss_kwargs = False
+        
         self.use_vllm = self.args.use_vllm
         if self.use_vllm:
             if not is_vllm_available():
@@ -110,7 +111,7 @@ class MultimodalGRPOTrainer(Trainer):
                     )
                 self.sampling_params = SamplingParams(
                     temperature=self.args.temperature,
-                    max_tokens=1200,
+                    max_tokens=self.args.vllm_max_token,
                 )
                 print(self.llm)
             self._last_loaded_step = (
@@ -152,7 +153,7 @@ class MultimodalGRPOTrainer(Trainer):
 
     # Get the per-token log probabilities for the completions for the model and the reference model
     def _get_per_token_logps(self, model, input_ids, attention_mask, pixel_values, position_ids, image_flags):
-        logits = model(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values, position_ids=position_ids, image_flags=image_flags ).logits  # (B, L, V)
+        logits = model(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values, position_ids=position_ids, image_flags=image_flags, use_cache=False, ).logits  # (B, L, V)
         logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
         input_ids = input_ids[:, 1:]  # (B, L-1), exclude the first input ID since we don't have logits for it
         # Compute the log probabilities for the input tokens. Use a loop to reduce memory peak.
@@ -174,7 +175,7 @@ class MultimodalGRPOTrainer(Trainer):
             raise ValueError("The GRPOTrainer does not support returning outputs")
 
         inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
-        ASSISTENT_TOKEN_ID = 77091
+        ASSISTENT_TOKEN_ID = self.args.ASSISTENT_TOKEN_ID
         start_turn_indices = (inputs["input_ids"] == ASSISTENT_TOKEN_ID).nonzero(as_tuple=True)[1]
         # Lấy index lớn nhất
         end_ques_index = start_turn_indices.max().item() + 2
@@ -197,14 +198,14 @@ class MultimodalGRPOTrainer(Trainer):
         #     num_beams = 1,
         #     length_penalty=1.
         # )
-        generation_config = dict(max_new_tokens= 1000, do_sample=True, num_beams = 1, temperature=1.0 , repetition_penalty=1.0, length_penalty=1.)
+        
 
         prompt_ids, prompt_mask = temp_inputs["input_ids"], temp_inputs["attention_mask"]
 
         ####################### Generate completions
         if self.args.use_vllm:
             # First, have main process load weights if needed
-            if self.state.global_step != self._last_loaded_step:
+            if self.state.global_step != self._last_loaded_step and self.accelerator.is_main_process:
                 with unwrap_model_for_generation(
                     model,
                     self.accelerator,
@@ -215,17 +216,17 @@ class MultimodalGRPOTrainer(Trainer):
                     else:
                         unwrapped_model_temp = unwrapped_model #.state_dict()
 
+                    unwrapped_model_temp_language_model = False
+                    unwrapped_model_temp_vision_model = False
+                    
                     if is_peft_model(unwrapped_model_temp.language_model):
                         unwrapped_model_temp.language_model.merge_adapter()
+                        unwrapped_model_temp_language_model = True
                     if is_peft_model(unwrapped_model_temp.vision_model):
                         unwrapped_model_temp.vision_model.merge_adapter()
+                        unwrapped_model_temp_vision_model = True
                         
                     state_dict = unwrapped_model_temp.state_dict()
-
-                    if is_peft_model(unwrapped_model_temp.language_model):
-                        unwrapped_model_temp.language_model.unmerge_adapter()
-                    if is_peft_model(unwrapped_model_temp.vision_model):
-                        unwrapped_model_temp.vision_model.unmerge_adapter()
                         
                     # Remove base_model and base_layer prefixes
                     state_dict = {
@@ -245,35 +246,22 @@ class MultimodalGRPOTrainer(Trainer):
                         for k, v in state_dict.items()
                         if "original_module" not in k
                     }
-                if self.accelerator.is_main_process:
                     llm_model = (
                         self.llm.llm_engine.model_executor.driver_worker.model_runner.model
                     )
                     llm_model.load_weights(state_dict.items())
-                    print(state_dict["language_model.model.layers.0.self_attn.v_proj.weight"].sum())
+
+                    if unwrapped_model_temp_language_model:
+                        unwrapped_model_temp.language_model.unmerge_adapter()
+                    if unwrapped_model_temp_vision_model:
+                        unwrapped_model_temp.vision_model.unmerge_adapter()
+                        
+                    print(llm_model.language_model.model.layers[23].self_attn.o_proj.weight.sum())
+                    print(state_dict["language_model.model.layers.23.self_attn.o_proj.weight"].sum())
                     print("- UPDATED VLLM WEIGHTS !", "="*100)
                 self._last_loaded_step = self.state.global_step
             
             if self.accelerator.is_main_process:
-                # all_completions = []
-                # for _ in range(self.args.num_generations):  # -1 because we already have one generation
-                #     vllm_inputs = []
-                #     completion = []
-                #     for sample_index in range(len(temp_inputs["input_ids"])):
-                #         vllm_prompt = self.tokenizer.decode(temp_inputs["input_ids"][sample_index])
-                #         vllm_prompt = re.sub(r"<img>.*?</img>", "<image>", vllm_prompt)
-                #         # print(vllm_prompt)
-                #         vllm_prompt ={
-                #             "prompt": vllm_prompt,
-                #                 "multi_modal_data": {
-                #                 "image": Image.fromarray(inputs["array_image"][sample_index].cpu().numpy())
-                #             }}
-                #         outputs = self.llm.generate(vllm_prompt, sampling_params=self.sampling_params, use_tqdm=False)
-                #         for vllm_output in outputs:
-                #             completion.append( self.tokenizer.encode(vllm_output.outputs[0].text ))
-                #     completion = torch.tensor(completion).cuda()
-                #     completion = torch.cat((temp_inputs["input_ids"],completion),dim=1)
-                #     all_completions.append(completion)
                 
                 all_completions = []
                 for _ in range(self.args.num_generations):
@@ -295,7 +283,7 @@ class MultimodalGRPOTrainer(Trainer):
                     # Process all outputs
                     completion = []
                     for output in batch_outputs:
-                        print(output.outputs[0].text)
+                        # print(output.outputs[0].text)
                         completion.append(self.tokenizer.encode(output.outputs[0].text))
                     
                     # Convert to tensor and concatenate
@@ -313,7 +301,7 @@ class MultimodalGRPOTrainer(Trainer):
         ############################# Stack all completions and pad if needed#######################
         max_length = max(completion.size(1) for completion in all_completions)
         padded_completions = []
-        pad_token_id = 151643
+        pad_token_id = self.args.pad_token_id
         for completion in all_completions:
             if completion.size(1) < max_length:
                 padding = torch.full((completion.size(0), max_length - completion.size(1)), 
@@ -328,12 +316,13 @@ class MultimodalGRPOTrainer(Trainer):
         # Stack all padded completions
         prompt_completion_ids = torch.cat(padded_completions, dim=0)
         prompt_length = prompt_ids.size(1)
+
         prompt_ids = prompt_completion_ids[:, :prompt_length]
         completion_ids = prompt_completion_ids[:, prompt_length:]
         prompt_mask = prompt_mask.repeat_interleave(self.args.num_generations, dim=0)
 
         #################### Mask everything after the first EOS token
-        eos_token_id = 151645
+        eos_token_id = self.args.pad_token_id ### use pad token for detect the end of seq 
         is_eos = completion_ids == eos_token_id
         device = self.accelerator.device
         eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
@@ -349,7 +338,8 @@ class MultimodalGRPOTrainer(Trainer):
         
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
-
+        print(prompt_completion_ids)
+        print(attention_mask)
         per_token_logps = self._get_per_token_logps(model, prompt_completion_ids, attention_mask, pixel_values, position_ids, image_flags)
         # print("per_token_logps", per_token_logps)
 
@@ -408,11 +398,27 @@ class MultimodalGRPOTrainer(Trainer):
         mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.args.num_generations, dim=0)
         std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.args.num_generations, dim=0)
         advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
-
+        print(advantages)
+        print( completion_mask.sum(dim=1))
         ###################### x - x.detach() allows for preserving gradients from x
-        per_token_loss = torch.exp(per_token_logps - per_token_logps.detach()) * advantages.unsqueeze(1)
-        per_token_loss = -(per_token_loss - self.args.beta * per_token_kl)
+        ####### LOSS FROM VLM-R1
+        old_per_token_logps = per_token_logps.detach()
+        coef_1 = torch.exp(per_token_logps - old_per_token_logps)
+        coef_2 = torch.clamp(coef_1, 1 - self.args.epsilon_low, 1 + self.args.epsilon_high)
+        per_token_loss1 = coef_1 * advantages.unsqueeze(1)
+        per_token_loss2 = coef_2 * advantages.unsqueeze(1)
+        per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+
+        loss_ = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+        print(loss_)
+        
+        per_token_loss = per_token_loss + self.args.beta * per_token_kl
         loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+        ################ OLD LOSS ########
+        
+        # per_token_loss = torch.exp(per_token_logps - per_token_logps.detach()) * advantages.unsqueeze(1)
+        # per_token_loss = -(per_token_loss - self.args.beta * per_token_kl)
+        # loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
 
         ###################### Log the metrics
         completion_length = self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item()
@@ -445,4 +451,4 @@ class MultimodalGRPOTrainer(Trainer):
         else:  # transformers<=4.46
             super().log(logs)
         self._metrics.clear()
-
+        
