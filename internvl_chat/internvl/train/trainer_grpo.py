@@ -83,7 +83,7 @@ class MultimodalGRPOTrainer(Trainer):
             if self.accelerator.is_main_process:
                 vllm_device = self.args.vllm_device
                 if vllm_device == "auto":
-                    vllm_device = f"cuda:{self.accelerator.num_processes}"  # take the next GPU idx
+                    vllm_device = f"cuda:{self.accelerator.num_processes-1}"  # take the next GPU idx
                 # Check that the requested device is available
                 if (
                     vllm_device.split(":")[0] == "cuda"

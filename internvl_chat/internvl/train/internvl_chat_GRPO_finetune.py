@@ -267,7 +267,50 @@ class DataTrainingArguments:
         default=False,
         metadata={'help': 'Whether to gather all during loss reduction. Default is False.'},
     )
-
+    # use_vllm: bool = field(
+    #     default=True,
+    #     metadata={'help': 'Whether to use vLLM for generation. Default is True.'},
+    # )
+    # num_generations: int = field(
+    #     default=4,
+    #     metadata={'help': 'Number of generations per prompt. Default is 4.'},
+    # )
+    # max_prompt_length: int = field(
+    #     default=500,
+    #     metadata={'help': 'Maximum length of the prompt. Default is 500.'},
+    # )
+    # max_completion_length: int = field(
+    #     default=1000,
+    #     metadata={'help': 'Maximum length of the completion. Default is 1000.'},
+    # )
+    # beta: float = field(
+    #     default=0.04,
+    #     metadata={'help': 'Beta value used in training or generation. Default is 0.04.'},
+    # )
+    # vllm_gpu_memory_utilization: float = field(
+    #     default=0.15,
+    #     metadata={'help': 'GPU memory utilization limit for vLLM. Default is 0.15.'},
+    # )
+    # vllm_max_token: int = field(
+    #     default=1000,
+    #     metadata={'help': 'Maximum number of tokens for vLLM. Default is 1000.'},
+    # )
+    # temperature: float = field(
+    #     default=0.5,
+    #     metadata={'help': 'Sampling temperature. Default is 0.5.'},
+    # )
+    # vllm_device: str = field(
+    #     default='auto',
+    #     metadata={'help': 'Device used for vLLM. Default is "auto".'},
+    # )
+    # epsilon_high: float = field(
+    #     default=0.2,
+    #     metadata={'help': 'High epsilon value for training strategy. Default is 0.2.'},
+    # )
+    # epsilon_low: float = field(
+    #     default=0.2,
+    #     metadata={'help': 'Low epsilon value for training strategy. Default is 0.2.'},
+    # )
 
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
@@ -1224,25 +1267,24 @@ def main():
                                                              "accuracy"
                                                             ]]
     training_args.reward_funcs =  reward_funcs
-    # from trl import GRPOConfig, GRPOTrainer
 
     training_args.use_vllm = True
     training_args.num_generations = 4
-    training_args.max_prompt_length = 400
-    training_args.max_completion_length = 800
-    training_args.beta = 0.01
+    training_args.max_prompt_length = 1500
+    training_args.max_completion_length = 1000
+    training_args.beta = 0.04
     training_args.vllm_gpu_memory_utilization = 0.15
-    training_args.vllm_max_token = 800
+    training_args.vllm_max_token = 1000
     training_args.temperature = 0.5
-    training_args.vllm_device = "cuda:0"
+    training_args.vllm_device = "auto" #"cuda:0"
     training_args.model_name_or_path = model_args.model_name_or_path
     training_args.max_grad_norm = 0.1 
-    training_args.epsilon_high = 0.3
-    training_args.epsilon_low = 0.3
-    training_args.pad_token_id = 151643
-    training_args.ASSISTENT_TOKEN_ID = 77091
-    training_args.eos_token_id = 151643 #151645
-
+    training_args.epsilon_high = 0.2
+    training_args.epsilon_low = 0.2
+    training_args.pad_token_id = tokenizer.encode(tokenizer.pad_token)[0] #151643
+    training_args.ASSISTENT_TOKEN_ID = tokenizer.encode("assistant")[0] #77091
+    training_args.eos_token_id = tokenizer.encode(tokenizer.pad_token)[0] #151643 #151645
+    training_args.lr_scheduler_kwargs = {"min_lr_rate":0.1}
     ######################################################################################################################################################################
     trainer = MultimodalGRPOTrainer(
         model=model,
