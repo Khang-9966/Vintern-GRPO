@@ -112,6 +112,9 @@ class MultimodalGRPOTrainer(Trainer):
                 self.sampling_params = SamplingParams(
                     temperature=self.args.temperature,
                     max_tokens=self.args.vllm_max_token,
+                    repetition_penalty=self.args.repetition_penalty,
+                    length_penalty=self.args.length_penalty,
+                    
                 )
                 print(self.llm)
             self._last_loaded_step = (

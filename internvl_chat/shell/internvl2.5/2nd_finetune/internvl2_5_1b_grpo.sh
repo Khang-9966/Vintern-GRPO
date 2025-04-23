@@ -35,21 +35,21 @@ fi
   # --epsilon_high 0.2 \
   # --epsilon_low 0.2 \
   
-CUDA_VISIBLE_DEVICES=1 torchrun \
+torchrun \
   --nnodes=1 \
   --node_rank=0 \
   --master_addr=127.0.0.1 \
   --nproc_per_node=${GPUS} \
   --master_port=${MASTER_PORT} \
   internvl/train/internvl_chat_GRPO_finetune.py \
-  --model_name_or_path "/data/llm/R1/InternVL/internvl_chat/model_outputs/internvl3_deepseek_1_frezee_2_continue_trainfull-merged" \
+  --model_name_or_path "internvl3_deepseek_1_frezee_2_continue_trainfull" \
   --conv_style "internvl2_5" \
   --use_fast_tokenizer False \
   --output_dir ${OUTPUT_DIR} \
-  --meta_path "./shell/data/math_r1.json" \
+  --meta_path "./shell/data/r1.json" \
   --overwrite_output_dir True \
   --force_image_size 448 \
-  --max_dynamic_patch 2 \
+  --max_dynamic_patch 4 \
   --down_sample_ratio 0.5 \
   --drop_path_rate 0.0 \
   --freeze_llm True \
@@ -59,19 +59,19 @@ CUDA_VISIBLE_DEVICES=1 torchrun \
   --vision_select_layer -1 \
   --dataloader_num_workers 1 \
   --bf16 True \
-  --num_train_epochs 3 \
+  --num_train_epochs 1 \
   --per_device_train_batch_size ${PER_DEVICE_BATCH_SIZE} \
   --gradient_accumulation_steps ${GRADIENT_ACC} \
   --evaluation_strategy "no" \
   --save_strategy "steps" \
   --save_steps 50 \
   --save_total_limit 1 \
-  --learning_rate 5e-6 \
+  --learning_rate 1e-6 \
   --weight_decay 0.01 \
   --warmup_ratio 0.03 \
   --lr_scheduler_type "cosine_with_min_lr" \
   --logging_steps 1 \
-  --max_seq_length 1500 \
+  --max_seq_length 4000 \
   --do_train True \
   --grad_checkpoint True \
   --group_by_length True \

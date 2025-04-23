@@ -883,9 +883,15 @@ def accuracy_reward(completions, **kwargs):
                 content_match = None
                 content_match = re.search(r'<answer>(.*?)</answer>', content)
 
-                if content_match is not None:
-                    student_answer = content_match.group(1).strip() #else content.strip()
-                
+                if "text{" in content_match.group(1).strip():
+                    content_match = re.search(r'text{(.*?)}', content_match.group(1).strip())
+                    if content_match is not None:
+                        student_answer = content_match.group(1).strip() #else content.strip()
+                elif "boxed{" in content_match.group(1).strip():
+                    content_match = re.search(r'boxed{(.*?)}', content_match.group(1).strip())
+                    if content_match is not None:
+                        student_answer = content_match.group(1).strip() #else content.strip()
+                            
                     # Compare the extracted answers
                     if student_answer == ground_truth:
                         reward = 1.0
@@ -898,7 +904,6 @@ def accuracy_reward(completions, **kwargs):
 
 def soft_accuracy_reward(completions, **kwargs):
     print("***"*100)
-    print(completions)
     solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
     contents = [completion for completion in completions]
     rewards = []
@@ -915,6 +920,13 @@ def soft_accuracy_reward(completions, **kwargs):
                     print("="*10,soft_accuracy_reward,ans)
                     if ans == ground_truth:
                         reward = 1.0
+                elif "text{" in content:
+                    content_match = re.search(r'text{(.*?)}', content)
+                    if content_match is not None:
+                        student_answer = content_match.group(1).strip() #else content.strip()
+                        # Compare the extracted answers
+                        if student_answer == ground_truth:
+                            reward = 1.0
                 elif "boxed{" in content:
                     content_match = re.search(r'boxed{(.*?)}', content)
                     if content_match is not None:
@@ -1264,18 +1276,21 @@ def main():
     }
     reward_funcs = [reward_funcs_registry[func] for func in ["format",
                                                              "soft_format_reward",
-                                                             "accuracy"
+                                                             "accuracy",
+                                                             "soft_accuracy_reward"
                                                             ]]
     training_args.reward_funcs =  reward_funcs
 
     training_args.use_vllm = True
     training_args.num_generations = 4
     training_args.max_prompt_length = 1500
-    training_args.max_completion_length = 1000
+    training_args.max_completion_length = 4000
     training_args.beta = 0.04
-    training_args.vllm_gpu_memory_utilization = 0.15
-    training_args.vllm_max_token = 1000
+    training_args.vllm_gpu_memory_utilization = 0.2
+    training_args.vllm_max_token = 2500
     training_args.temperature = 0.5
+    training_args.repetition_penalty = 1.05
+    training_args.length_penalty = 1.0
     training_args.vllm_device = "auto" #"cuda:0"
     training_args.model_name_or_path = model_args.model_name_or_path
     training_args.max_grad_norm = 0.1 
@@ -1285,6 +1300,7 @@ def main():
     training_args.ASSISTENT_TOKEN_ID = tokenizer.encode("assistant")[0] #77091
     training_args.eos_token_id = tokenizer.encode(tokenizer.pad_token)[0] #151643 #151645
     training_args.lr_scheduler_kwargs = {"min_lr_rate":0.1}
+    
     ######################################################################################################################################################################
     trainer = MultimodalGRPOTrainer(
         model=model,
