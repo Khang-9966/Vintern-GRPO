@@ -11,7 +11,7 @@ export MASTER_PORT=34229
 export TF_CPP_MIN_LOG_LEVEL=3
 export LAUNCHER=pytorch
 
-OUTPUT_DIR='grpo_train_outputs/internvl3_deepseek_1_frezee_2_continue_trainfull_test'
+OUTPUT_DIR='grpo_train_outputs/internvl3_deepseek_1_frezee_2_continue_trainfull_test_lr2e5_short_ans_prompt'
 
 if [ ! -d "$OUTPUT_DIR" ]; then
   mkdir -p "$OUTPUT_DIR"
@@ -66,7 +66,7 @@ torchrun \
   --save_strategy "steps" \
   --save_steps 50 \
   --save_total_limit 1 \
-  --learning_rate 1e-6 \
+  --learning_rate 2e-5 \
   --weight_decay 0.01 \
   --warmup_ratio 0.03 \
   --lr_scheduler_type "cosine_with_min_lr" \
