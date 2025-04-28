@@ -11,7 +11,7 @@ export MASTER_PORT=34229
 export TF_CPP_MIN_LOG_LEVEL=3
 export LAUNCHER=pytorch
 
-OUTPUT_DIR='grpo_train_outputs/internvl3_deepseek_1_frezee_2_continue_trainfull_test'
+OUTPUT_DIR='grpo_train_outputs/InternVL3-1B-qvq-merged-GRPO'
 
 if [ ! -d "$OUTPUT_DIR" ]; then
   mkdir -p "$OUTPUT_DIR"
@@ -42,14 +42,14 @@ CUDA_VISIBLE_DEVICES=1 torchrun \
   --nproc_per_node=${GPUS} \
   --master_port=${MASTER_PORT} \
   internvl/train/internvl_chat_GRPO_finetune.py \
-  --model_name_or_path "/data/llm/R1/InternVL/internvl_chat/model_outputs/internvl3_deepseek_1_frezee_2_continue_trainfull-merged" \
+  --model_name_or_path "/data/llm/R1/InternVL/internvl_chat/model_outputs/InternVL3-1B-qvq-merged" \
   --conv_style "internvl2_5" \
   --use_fast_tokenizer False \
   --output_dir ${OUTPUT_DIR} \
   --meta_path "./shell/data/math_r1.json" \
   --overwrite_output_dir True \
   --force_image_size 448 \
-  --max_dynamic_patch 2 \
+  --max_dynamic_patch 4 \
   --down_sample_ratio 0.5 \
   --drop_path_rate 0.0 \
   --freeze_llm True \
@@ -71,7 +71,7 @@ CUDA_VISIBLE_DEVICES=1 torchrun \
   --warmup_ratio 0.03 \
   --lr_scheduler_type "cosine_with_min_lr" \
   --logging_steps 1 \
-  --max_seq_length 1500 \
+  --max_seq_length 2000 \
   --do_train True \
   --grad_checkpoint True \
   --group_by_length True \

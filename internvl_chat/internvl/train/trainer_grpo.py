@@ -107,11 +107,13 @@ class MultimodalGRPOTrainer(Trainer):
                         dtype=torch.bfloat16,
                         # enable_prefix_caching=True,
                         # enforce_eager=True,
-                        max_model_len=self.args.max_completion_length
+                        max_model_len=self.args.max_completion_length,
                     )
                 self.sampling_params = SamplingParams(
                     temperature=self.args.temperature,
                     max_tokens=self.args.vllm_max_token,
+                    repetition_penalty=self.args.repetition_penalty,
+                    length_penalty=self.args.length_penalty,
                 )
                 print(self.llm)
             self._last_loaded_step = (
@@ -284,11 +286,11 @@ class MultimodalGRPOTrainer(Trainer):
                     completion = []
                     for output in batch_outputs:
                         # print(output.outputs[0].text)
-                        completion.append(self.tokenizer.encode(output.outputs[0].text))
-                    
+                        completion.append(self.tokenizer.encode(output.outputs[0].text + self.tokenizer.decode(self.args.eos_token_id) ))
+                
                     # Convert to tensor and concatenate
                     completion = torch.tensor(completion).cuda()
-                    completion = torch.cat((temp_inputs["input_ids"], completion), dim=1)
+                    completion = torch.cat((temp_inputs["input_ids"], completion ), dim=1)
                     all_completions.append(completion)
         else:        
         ######################################################################################################
@@ -322,11 +324,12 @@ class MultimodalGRPOTrainer(Trainer):
         prompt_mask = prompt_mask.repeat_interleave(self.args.num_generations, dim=0)
 
         #################### Mask everything after the first EOS token
-        eos_token_id = self.args.pad_token_id ### use pad token for detect the end of seq 
+        eos_token_id = self.args.eos_token_id ### use pad token for detect the end of seq 
         is_eos = completion_ids == eos_token_id
         device = self.accelerator.device
         eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
+        
         sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
         completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
         # print(is_eos, completion_mask)

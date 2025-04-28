@@ -898,7 +898,7 @@ def accuracy_reward(completions, **kwargs):
 
 def soft_accuracy_reward(completions, **kwargs):
     print("***"*100)
-    print(completions)
+    # print(completions)
     solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
     contents = [completion for completion in completions]
     rewards = []
@@ -911,12 +911,12 @@ def soft_accuracy_reward(completions, **kwargs):
             try:
                 ground_truth = sol
                 if "Answer:" in content:
-                    ans =  content.split("Answer:")[-1].repalce(" ","").repalce("\n","")
+                    ans =  content.split("Answer**:")[-1].repalce(" ","").repalce("\n","")
                     print("="*10,soft_accuracy_reward,ans)
                     if ans == ground_truth:
                         reward = 1.0
-                elif "boxed{" in content:
-                    content_match = re.search(r'boxed{(.*?)}', content)
+                elif "<answer>" in content:
+                    content_match = re.search(r'<answer>(.*?)</answer>', content)
                     if content_match is not None:
                         student_answer = content_match.group(1).strip() #else content.strip()
                         # Compare the extracted answers
@@ -930,6 +930,89 @@ def soft_accuracy_reward(completions, **kwargs):
 
     return rewards
 
+
+# def accuracy_reward(completions, **kwargs):
+#     print("***"*100)
+#     print(completions)
+#     solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
+#     print("------------------> solution: ",solution)
+#     contents = [completion for completion in completions]
+#     rewards = []
+
+#     for content, sol in zip(contents, solution):
+#         # print(content)
+#         reward = 0.0    
+#         # If symbolic verification failed, try string matching
+#         if reward == 0.0:
+#             try:
+#                 # Extract answer from solution if it has think/answer tags
+#                 # sol_match = re.search(r'<answer>(.*?)</answer>', sol)
+#                 # if sol_match:
+#                 #     ground_truth = sol_match.group(1).strip()  #else sol.strip()
+#                 ground_truth = sol
+#                 # Extract answer from content if it has think/answer tags
+#                 content_match = None
+#                 content_match = re.search(r'<answer>(.*?)</answer>', content)
+
+#                 if "text{" in content_match.group(1).strip():
+#                     content_match = re.search(r'text{(.*?)}', content_match.group(1).strip())
+#                     if content_match is not None:
+#                         student_answer = content_match.group(1).strip() #else content.strip()
+#                 elif "boxed{" in content_match.group(1).strip():
+#                     content_match = re.search(r'boxed{(.*?)}', content_match.group(1).strip())
+#                     if content_match is not None:
+#                         student_answer = content_match.group(1).strip() #else content.strip()
+                            
+#                     # Compare the extracted answers
+#                     if student_answer == ground_truth:
+#                         reward = 1.0
+#             except Exception:
+#                 pass  # Keep reward as 0.0 if both methods fail
+
+#         rewards.append(reward)
+
+#     return rewards
+
+# def soft_accuracy_reward(completions, **kwargs):
+#     print("***"*100)
+#     solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
+#     contents = [completion for completion in completions]
+#     rewards = []
+
+#     for content, sol in zip(contents, solution):
+#         # print(content)
+#         reward = 0.0    
+#         # If symbolic verification failed, try string matching
+#         if reward == 0.0:
+#             try:
+#                 ground_truth = sol
+#                 if "Answer:" in content:
+#                     ans =  content.split("Answer:")[-1].repalce(" ","").repalce("\n","")
+#                     print("="*10,soft_accuracy_reward,ans)
+#                     if ans == ground_truth:
+#                         reward = 1.0
+#                 elif "text{" in content:
+#                     content_match = re.search(r'text{(.*?)}', content)
+#                     if content_match is not None:
+#                         student_answer = content_match.group(1).strip() #else content.strip()
+#                         # Compare the extracted answers
+#                         if student_answer == ground_truth:
+#                             reward = 1.0
+#                 elif "boxed{" in content:
+#                     content_match = re.search(r'boxed{(.*?)}', content)
+#                     if content_match is not None:
+#                         student_answer = content_match.group(1).strip() #else content.strip()
+#                         # Compare the extracted answers
+#                         if student_answer == ground_truth:
+#                             reward = 1.0
+    
+#             except Exception:
+#                 pass  # Keep reward as 0.0 if both methods fail
+
+#         rewards.append(reward)
+
+#     return rewards
+    
 def count_xml(text) -> float:
     count = 0.0
     if text.count("<reasoning>") == 1:
@@ -962,6 +1045,20 @@ def soft_format_reward(completions, **kwargs):
             score += 0.5
         if re.search(r"<answer>.*?</answer>", completion, re.DOTALL):
             score += 0.5
+        rewards.append(score)
+    return rewards
+
+def len_reward(completions, **kwargs):
+    rewards = []
+    for completion in completions:
+        score = 0.5
+        # Count number of words
+        word_count = len(completion.split())
+        if word_count > 600:
+            excess = word_count - 600
+            penalty = (excess // 100) * 0.1
+            score -= penalty
+            score = max(score,-0.5)
         rewards.append(score)
     return rewards
     
@@ -1260,22 +1357,28 @@ def main():
         "xmlcount_reward": xmlcount_reward_func,
         "math_reward": math_reward_func,
         "soft_accuracy_reward": soft_accuracy_reward,
-        "soft_format_reward": soft_format_reward
+        "soft_format_reward": soft_format_reward,
+        "len_reward" : len_reward
     }
     reward_funcs = [reward_funcs_registry[func] for func in ["format",
                                                              "soft_format_reward",
-                                                             "accuracy"
+                                                             "accuracy",
+                                                             "soft_format_reward",
+                                                             "xmlcount_reward",
+                                                             "soft_accuracy_reward"
                                                             ]]
     training_args.reward_funcs =  reward_funcs
 
     training_args.use_vllm = True
     training_args.num_generations = 4
     training_args.max_prompt_length = 1500
-    training_args.max_completion_length = 1000
+    training_args.max_completion_length = 2000
     training_args.beta = 0.04
     training_args.vllm_gpu_memory_utilization = 0.15
     training_args.vllm_max_token = 1000
-    training_args.temperature = 0.5
+    training_args.temperature = 0.7
+    training_args.repetition_penalty = 1.0
+    training_args.length_penalty = 1.0
     training_args.vllm_device = "auto" #"cuda:0"
     training_args.model_name_or_path = model_args.model_name_or_path
     training_args.max_grad_norm = 0.1 
@@ -1283,7 +1386,7 @@ def main():
     training_args.epsilon_low = 0.2
     training_args.pad_token_id = tokenizer.encode(tokenizer.pad_token)[0] #151643
     training_args.ASSISTENT_TOKEN_ID = tokenizer.encode("assistant")[0] #77091
-    training_args.eos_token_id = tokenizer.encode(tokenizer.pad_token)[0] #151643 #151645
+    training_args.eos_token_id = tokenizer.encode(tokenizer.eos_token)[0] #151643 #151645
     training_args.lr_scheduler_kwargs = {"min_lr_rate":0.1}
     ######################################################################################################################################################################
     trainer = MultimodalGRPOTrainer(
