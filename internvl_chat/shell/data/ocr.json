@@ -1,0 +1,9 @@
+{
+  "coco_karpathy_train_567k": {
+    "root": "/data/llm/Vintern-7B/internvl_chat/",
+    "annotation": "/data/llm/Vintern-7B/internvl_chat/new_ocr_dataset/cinnamon_ocr_train.jsonl",
+    "data_augment": false,
+    "repeat_time": 1,
+    "length": 566747
+  }
+}

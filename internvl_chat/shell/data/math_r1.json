@@ -1,0 +1,9 @@
+{
+  "coco_karpathy_train_567k": {
+    "root": "/data/llm/R1/GRPO_InternVL/",
+    "annotation": "/data/llm/R1/GRPO_InternVL/MathVista/MathVista.jsonl",
+    "data_augment": false,
+    "repeat_time": 1,
+    "length": 566747
+  }
+}

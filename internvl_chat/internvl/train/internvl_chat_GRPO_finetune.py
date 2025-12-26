@@ -3,6 +3,8 @@
 # Copyright (c) 2024 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
+import warnings
+warnings.filterwarnings('ignore', message='.*Trainer.tokenizer.*')
 
 import logging
 import math
@@ -854,258 +856,284 @@ def len2weight(x, loss_reduction):
     raise NotImplementedError(loss_reduction)
 
 ###########################################################################################################################################################
+import math
+import difflib
+import numpy as np
+
+# ======================================================================
+# 1. CÁC HÀM TÍNH TOÁN KHOẢNG CÁCH (Metric Calculation)
+# ======================================================================
+import unicodedata
 import re
-def extract_xml_answer(text: str) -> str:
-    answer = text.split("<answer>")[-1]
-    answer = answer.split("</answer>")[0]
-    return answer.strip()
+
+def remove_vietnamese_accents(text):
+    """
+    Chuyển đổi chuỗi Tiếng Việt có dấu thành không dấu.
+    Ví dụ: "Đường đời tấp nập" -> "duong doi tap nap"
+    """
+    if not isinstance(text, str):
+        return str(text)
     
-def accuracy_reward(completions, **kwargs):
-    print("***"*100)
-    print(completions)
-    solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
-    print("------------------> solution: ",solution)
-    contents = [completion for completion in completions]
+    # 1. Chuẩn hóa unicode tổ hợp/dựng sẵn
+    text = unicodedata.normalize('NFC', text)
+    
+    # 2. Xử lý Đ/đ riêng (vì NFD không tách được đ)
+    text = re.sub(r'[đĐ]', 'd', text)
+    
+    # 3. Tách dấu bằng NFD và loại bỏ non-spacing mark
+    text = unicodedata.normalize('NFD', text)
+    text = ''.join([c for c in text if unicodedata.category(c) != 'Mn'])
+    
+    return text.lower()
+    
+def calculate_cer(pred, target):
+    """Tính Character Error Rate (CER)"""
+    if not target:
+        return 1.0 if pred else 0.0
+    
+    # Sử dụng SequenceMatcher để tính tỷ lệ giống nhau
+    # ratio() trả về 2*M / T, trong đó M là số ký tự khớp, T là tổng số ký tự
+    # Chúng ta cần khoảng cách chỉnh sửa, nhưng dùng ratio cho nhanh và normalize sẵn
+    sm = difflib.SequenceMatcher(None, pred, target)
+    return 1.0 - sm.ratio()
+
+def calculate_wer(pred, target):
+    """Tính Word Error Rate (WER)"""
+    pred_words = pred.split()
+    target_words = target.split()
+    
+    if not target_words:
+        return 1.0 if pred_words else 0.0
+        
+    # Tính Levenshtein distance trên list các từ
+    sm = difflib.SequenceMatcher(None, pred_words, target_words)
+    return 1.0 - sm.ratio()
+
+def get_ground_truth(kwargs, index):
+    """
+    Lấy Ground Truth từ kwargs.
+    Hàm này giả định dataset trả về field 'answer' hoặc 'label' chứa raw text.
+    """
+    # GRPO thường truyền các cột của dataset vào kwargs
+    # Bạn cần đảm bảo trong LazySupervisedDataset, phần return dict có key 'answer'
+    # 1️⃣ Ưu tiên prompts (logic mới)
+    if 'prompts' in kwargs:
+        p = kwargs['prompts'][index]
+        if isinstance(p, str) and "assistant\n" in p:
+            return p.split("assistant\n", 1)[1].strip()
+    
+    # Fallback: Nếu không tìm thấy, thử decode từ labels (nếu có tokenizer global - ít khả thi)
+    # Trả về chuỗi rỗng để tránh crash
+    return ""
+
+# ======================================================================
+# 2. CÁC HÀM REWARD (Reward Functions)
+# ======================================================================
+
+# --- Reward 1: CER (Character Accuracy) ---
+# Reward = độ tương đồng ký tự (0.0 -> 1.0). Càng giống càng cao.
+def cer_reward_func(completions, **kwargs):
     rewards = []
-
-    for content, sol in zip(contents, solution):
-        # print(content)
-        reward = 0.0    
-        # If symbolic verification failed, try string matching
-        if reward == 0.0:
-            try:
-                # Extract answer from solution if it has think/answer tags
-                # sol_match = re.search(r'<answer>(.*?)</answer>', sol)
-                # if sol_match:
-                #     ground_truth = sol_match.group(1).strip()  #else sol.strip()
-                ground_truth = sol
-                # Extract answer from content if it has think/answer tags
-                content_match = None
-                content_match = re.search(r'<answer>(.*?)</answer>', content)
-
-                if content_match is not None:
-                    student_answer = content_match.group(1).strip() #else content.strip()
-                
-                    # Compare the extracted answers
-                    if student_answer == ground_truth:
-                        reward = 1.0
-            except Exception:
-                pass  # Keep reward as 0.0 if both methods fail
-
-        rewards.append(reward)
-
+    # completions là list các output của model
+    # kwargs chứa các thông tin batch khác (prompts, answer, etc.)
+    
+    for i, pred_text in enumerate(completions):
+        gt_text = get_ground_truth(kwargs, i)
+        
+        # Chuẩn hóa chuỗi (OCR thường không quan trọng khoảng trắng thừa)
+        pred_clean = pred_text.strip()
+        gt_clean = gt_text.strip()
+        print(pred_clean,"====",gt_clean)
+        if not gt_clean:
+            rewards.append(0.0)
+            continue
+            
+        # Tính độ tương đồng ký tự (Similarity = 1 - Error)
+        # SequenceMatcher.ratio() trả về [0, 1]
+        matcher = difflib.SequenceMatcher(None, pred_clean, gt_clean)
+        similarity = matcher.ratio()
+        
+        rewards.append(similarity)
     return rewards
 
-def soft_accuracy_reward(completions, **kwargs):
-    print("***"*100)
-    # print(completions)
-    solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
-    contents = [completion for completion in completions]
+# --- Reward 2: WER (Word Accuracy) ---
+# Reward = độ tương đồng từ vựng. Giúp model tách từ đúng.
+def wer_reward_func(completions, **kwargs):
     rewards = []
-
-    for content, sol in zip(contents, solution):
-        # print(content)
-        reward = 0.0    
-        # If symbolic verification failed, try string matching
-        if reward == 0.0:
-            try:
-                ground_truth = sol
-                if "Answer:" in content:
-                    ans =  content.split("Answer**:")[-1].repalce(" ","").repalce("\n","")
-                    print("="*10,soft_accuracy_reward,ans)
-                    if ans == ground_truth:
-                        reward = 1.0
-                elif "<answer>" in content:
-                    content_match = re.search(r'<answer>(.*?)</answer>', content)
-                    if content_match is not None:
-                        student_answer = content_match.group(1).strip() #else content.strip()
-                        # Compare the extracted answers
-                        if student_answer == ground_truth:
-                            reward = 1.0
-    
-            except Exception:
-                pass  # Keep reward as 0.0 if both methods fail
-
-        rewards.append(reward)
-
+    for i, pred_text in enumerate(completions):
+        gt_text = get_ground_truth(kwargs, i)
+        
+        pred_words = pred_text.strip().split()
+        gt_words = gt_text.strip().split()
+        
+        if not gt_words:
+            rewards.append(0.0)
+            continue
+            
+        matcher = difflib.SequenceMatcher(None, pred_words, gt_words)
+        similarity = matcher.ratio()
+        
+        rewards.append(similarity)
     return rewards
 
-
-# def accuracy_reward(completions, **kwargs):
-#     print("***"*100)
-#     print(completions)
-#     solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
-#     print("------------------> solution: ",solution)
-#     contents = [completion for completion in completions]
-#     rewards = []
-
-#     for content, sol in zip(contents, solution):
-#         # print(content)
-#         reward = 0.0    
-#         # If symbolic verification failed, try string matching
-#         if reward == 0.0:
-#             try:
-#                 # Extract answer from solution if it has think/answer tags
-#                 # sol_match = re.search(r'<answer>(.*?)</answer>', sol)
-#                 # if sol_match:
-#                 #     ground_truth = sol_match.group(1).strip()  #else sol.strip()
-#                 ground_truth = sol
-#                 # Extract answer from content if it has think/answer tags
-#                 content_match = None
-#                 content_match = re.search(r'<answer>(.*?)</answer>', content)
-
-#                 if "text{" in content_match.group(1).strip():
-#                     content_match = re.search(r'text{(.*?)}', content_match.group(1).strip())
-#                     if content_match is not None:
-#                         student_answer = content_match.group(1).strip() #else content.strip()
-#                 elif "boxed{" in content_match.group(1).strip():
-#                     content_match = re.search(r'boxed{(.*?)}', content_match.group(1).strip())
-#                     if content_match is not None:
-#                         student_answer = content_match.group(1).strip() #else content.strip()
-                            
-#                     # Compare the extracted answers
-#                     if student_answer == ground_truth:
-#                         reward = 1.0
-#             except Exception:
-#                 pass  # Keep reward as 0.0 if both methods fail
-
-#         rewards.append(reward)
-
-#     return rewards
-
-# def soft_accuracy_reward(completions, **kwargs):
-#     print("***"*100)
-#     solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
-#     contents = [completion for completion in completions]
-#     rewards = []
-
-#     for content, sol in zip(contents, solution):
-#         # print(content)
-#         reward = 0.0    
-#         # If symbolic verification failed, try string matching
-#         if reward == 0.0:
-#             try:
-#                 ground_truth = sol
-#                 if "Answer:" in content:
-#                     ans =  content.split("Answer:")[-1].repalce(" ","").repalce("\n","")
-#                     print("="*10,soft_accuracy_reward,ans)
-#                     if ans == ground_truth:
-#                         reward = 1.0
-#                 elif "text{" in content:
-#                     content_match = re.search(r'text{(.*?)}', content)
-#                     if content_match is not None:
-#                         student_answer = content_match.group(1).strip() #else content.strip()
-#                         # Compare the extracted answers
-#                         if student_answer == ground_truth:
-#                             reward = 1.0
-#                 elif "boxed{" in content:
-#                     content_match = re.search(r'boxed{(.*?)}', content)
-#                     if content_match is not None:
-#                         student_answer = content_match.group(1).strip() #else content.strip()
-#                         # Compare the extracted answers
-#                         if student_answer == ground_truth:
-#                             reward = 1.0
-    
-#             except Exception:
-#                 pass  # Keep reward as 0.0 if both methods fail
-
-#         rewards.append(reward)
-
-#     return rewards
-    
-def count_xml(text) -> float:
-    count = 0.0
-    if text.count("<reasoning>") == 1:
-        count += 0.125
-    if text.count("</reasoning>") == 1:
-        count += 0.125
-    if text.count("<answer>") == 1:
-        count += 0.125
-        count -= len(text.split("</answer>")[-1])*0.001
-    if text.count("</answer>") == 1:
-        count += 0.125
-        count -= (len(text.split("</answer>")[-1]) - 1)*0.001
-    return count
-
-def xmlcount_reward_func(completions, **kwargs) -> list[float]:
-    contents = [completion for completion in completions]
-    return [count_xml(c) for c in contents]
-
-def format_reward(completions, **kwargs):
-    pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
-    completion_contents = [completion for completion in completions]
-    matches = [re.fullmatch(pattern, content, re.DOTALL) for content in completion_contents]
-    return [1.0 if match else 0.0 for match in matches]
-
-def soft_format_reward(completions, **kwargs):
+# --- Reward 3: Exact Match (Accuracy tuyệt đối) ---
+# Thưởng cực lớn nếu đúng y hệt
+def exact_match_reward_func(completions, **kwargs):
     rewards = []
-    for completion in completions:
-        score = 0.0
-        if re.search(r"<reasoning>.*?</reasoning>", completion, re.DOTALL):
-            score += 0.5
-        if re.search(r"<answer>.*?</answer>", completion, re.DOTALL):
-            score += 0.5
+    for i, pred_text in enumerate(completions):
+        gt_text = get_ground_truth(kwargs, i)
+        
+        # So sánh sau khi strip
+        if pred_text.strip() == gt_text.strip():
+            rewards.append(3.0)
+        else:
+            rewards.append(0.0)
+    return rewards
+
+# --- Reward 4: Length Consistency (Phạt độ dài) ---
+# Dùng hàm Gaussian để phạt nhẹ nhàng hơn, tránh phạt quá gắt
+def length_reward_func(completions, **kwargs):
+    rewards = []
+    for i, pred_text in enumerate(completions):
+        gt_text = get_ground_truth(kwargs, i)
+        
+        len_pred = len(pred_text.strip())
+        len_gt = len(gt_text.strip())
+        
+        if len_gt == 0:
+            rewards.append(0.0)
+            continue
+            
+        # Độ lệch
+        diff = abs(len_pred - len_gt)
+        
+        # Nếu lệch ít (< 10% hoặc < 5 ký tự) thì coi như tốt
+        if diff <= max(5, int(0.1 * len_gt)):
+            rewards.append(0.1)
+        else:
+            # Phạt dựa trên tỷ lệ sai lệch
+            # Càng lệch xa càng âm, tối đa âm -0.5
+            ratio = diff / len_gt
+            penalty = min(0.5, ratio * 0.5)
+            rewards.append(-penalty)
+            
+    return rewards
+# --- Reward 5: Vietnamese Normalized Accuracy (Bỏ qua lỗi dấu) ---
+# Mục tiêu: Giúp model học đúng ký tự cơ bản (a, e, o...) trước khi học dấu.
+# Nếu model ra "truong" mà nhãn là "trường" -> Reward = 1.0
+def vietnamese_normalized_reward_func(completions, **kwargs):
+    rewards = []
+    for i, pred_text in enumerate(completions):
+        gt_text = get_ground_truth(kwargs, i) # Hàm lấy GT đã viết ở bài trước
+        
+        # Bỏ dấu cả 2 chuỗi
+        pred_norm = remove_vietnamese_accents(pred_text.strip())
+        gt_norm = remove_vietnamese_accents(gt_text.strip())
+        
+        if not gt_norm:
+            rewards.append(0.0)
+            continue
+            
+        # Tính độ tương đồng trên chuỗi không dấu
+        matcher = difflib.SequenceMatcher(None, pred_norm, gt_norm)
+        rewards.append(matcher.ratio())
+        
+    return rewards
+
+# --- Reward 6: Word Containment (Kiểm tra từ xuất hiện) ---
+# Mục tiêu: "Easy mode". Chỉ cần từ đúng có xuất hiện là được thưởng.
+# Giúp model không bị 0 điểm nếu lỡ đảo thứ tự từ.
+def word_containment_reward_func(completions, **kwargs):
+    rewards = []
+    for i, pred_text in enumerate(completions):
+        gt_text = get_ground_truth(kwargs, i)
+        
+        # Tách từ cơ bản
+        pred_words = set(pred_text.lower().split())
+        gt_words = set(gt_text.lower().split())
+        
+        if not gt_words:
+            rewards.append(0.0)
+            continue
+            
+        # Đếm bao nhiêu từ trong GT xuất hiện trong Pred
+        # intersection: tìm các từ chung
+        common_words = gt_words.intersection(pred_words)
+        
+        # Điểm = Số từ tìm thấy / Tổng số từ cần tìm
+        score = len(common_words) / len(gt_words)
         rewards.append(score)
+        
     return rewards
 
-def len_reward(completions, **kwargs):
+# --- Reward 7: Soft Diacritic Penalty (Phạt nhẹ lỗi dấu) ---
+# Thưởng nếu model viết đúng dấu (đây là reward để model "tốt nghiệp" sau khi đã học được chữ cái)
+# Logic: Reward này so sánh tỷ lệ dấu khớp nhau.
+def diacritic_check_reward_func(completions, **kwargs):
     rewards = []
-    for completion in completions:
-        score = 0.5
-        # Count number of words
-        word_count = len(completion.split())
-        if word_count > 600:
-            excess = word_count - 600
-            penalty = (excess // 100) * 0.1
-            score -= penalty
-            score = max(score,-0.5)
-        rewards.append(score)
+    vietnamese_chars = "ăâđêôơưàảãáạằẳẵắặầẩẫấậèẻẽéẹềểễếệìỉĩíịòỏõóọồổỗốộờởỡớợùủũúụừửữứựỳỷỹýỵ"
+    
+    for i, pred_text in enumerate(completions):
+        gt_text = get_ground_truth(kwargs, i)
+        
+        # Chỉ lấy các ký tự có dấu trong GT và Pred để so sánh
+        gt_accents = [c for c in gt_text.lower() if c in vietnamese_chars]
+        pred_accents = [c for c in pred_text.lower() if c in vietnamese_chars]
+        
+        if not gt_accents:
+            # Nếu câu gốc không có dấu (tiếng Anh), bỏ qua reward này (cho max điểm hoặc 0)
+            rewards.append(0.1) 
+            continue
+            
+        if not pred_accents:
+            rewards.append(0.0) # Có dấu mà không viết cái nào -> 0
+            continue
+            
+        # So sánh chuỗi các ký tự dấu
+        matcher = difflib.SequenceMatcher(None, "".join(pred_accents), "".join(gt_accents))
+        rewards.append(matcher.ratio())
+        
     return rewards
-    
-def count_math_operations(text) -> float:
-    pattern = re.compile(r'[-+*/]')
-    count = 0
-    for match in pattern.finditer(text):
-        op_index = match.start()
-        
-        # Tìm ký tự không phải khoảng trắng bên trái
-        left = None
-        i = op_index - 1
-        while i >= 0:
-            if not text[i].isspace():
-                left = text[i]
-                break
-            i -= 1
-        
-        # Tìm ký tự không phải khoảng trắng bên phải
-        right = None
-        i = match.end()
-        while i < len(text):
-            if not text[i].isspace():
-                right = text[i]
-                break
-            i += 1
-        
-        # Nếu ít nhất một bên là số thì đếm phép toán này
-        if (left is not None and left.isdigit()) or (right is not None and right.isdigit()):
-            count += 1
-    
-    if count == 0:
-        return 0.0  # Không có phép toán nào
-    elif count == 5:
-        return 0.25  # Một phép toán
-    elif count == 10:
-        return 0.5  # Hai phép toán
-    elif count == 15:
-        return 0.75  # Ba phép toán
-    elif count <= 20:
-        return 1.0  # Thưởng tối đa nếu dưới hoặc bằng 20 phép toán
-    else:
-        return max(-1.0, 1.0 - (count - 20) * 0.1)  # Phạt khi trên 20 phép toán
 
-def math_reward_func(completions, **kwargs) -> list[float]:
-    return [count_math_operations(c) for c in completions]
+def extract_vowels_and_tones(text):
+    """
+    Hàm này loại bỏ hết phụ âm, chỉ giữ lại nguyên âm và dấu.
+    Ví dụ: "Trường học" -> "ươ-huyền o-nặng" (đại khái là chuỗi các ký tự có dấu)
+    """
+    # Danh sách các nguyên âm tiếng Việt (bao gồm cả có dấu)
+    vowels = "aáàảãạăắằẳẵặâấầẩẫậeéèẻẽẹêếềểễệiíìỉĩịoóòỏõọôốồổỗộơớờởỡợuúùủũụưứừửữựyýỳỷỹỵ"
     
+    # Chỉ giữ lại các ký tự nằm trong tập nguyên âm
+    filtered = "".join([c for c in text.lower() if c in vowels])
+    return filtered
+
+# --- Reward 8: Vowel & Tone Accuracy (Chuyên trị sai dấu) ---
+# Reward này bỏ qua hoàn toàn phụ âm, chỉ so sánh phần "xương sống" của tiếng Việt là nguyên âm và dấu.
+# Giúp model tập trung sự chú ý vào các vùng nhỏ này.
+def vowel_tone_reward_func(completions, **kwargs):
+    rewards = []
+    for i, pred_text in enumerate(completions):
+        gt_text = get_ground_truth(kwargs, i)
+        
+        # Trích xuất cốt lõi dấu: "Trường học" -> "ươò" (ví dụ)
+        pred_vowels = extract_vowels_and_tones(pred_text)
+        gt_vowels = extract_vowels_and_tones(gt_text)
+        
+        if not gt_vowels:
+            rewards.append(0.0)
+            continue
+            
+        # So sánh chuỗi nguyên âm bằng Levenshtein
+        # Nếu sai dấu, chuỗi này sẽ khác biệt ngay
+        matcher = difflib.SequenceMatcher(None, pred_vowels, gt_vowels)
+        
+        # Tăng cường độ phạt: Nếu sai ở đây, trừ điểm rất nặng (mũ 3)
+        # Để model hiểu là sai dấu là lỗi nghiêm trọng
+        score = matcher.ratio()
+        rewards.append(score) 
+        
+    return rewards
+
 def main():
     # Apply necessary patches for the transformers library
     replace_llama_rmsnorm_with_fused_rmsnorm()
@@ -1286,8 +1314,8 @@ def main():
     model.language_model.config.use_cache = False
     model.vision_model.gradient_checkpointing = True
     model.vision_model.encoder.gradient_checkpointing = True
-    if model_args.grad_checkpoint:
-        model.language_model._set_gradient_checkpointing()
+    # if model_args.grad_checkpoint:
+    model.language_model._set_gradient_checkpointing()
 
     train_dataset = build_datasets(
         data_args, tokenizer, tcs_loader, model, group_by_length=training_args.group_by_length,
@@ -1352,38 +1380,46 @@ def main():
         
     
     reward_funcs_registry = {
-        "accuracy": accuracy_reward,
-        "format": format_reward,
-        "xmlcount_reward": xmlcount_reward_func,
-        "math_reward": math_reward_func,
-        "soft_accuracy_reward": soft_accuracy_reward,
-        "soft_format_reward": soft_format_reward,
-        "len_reward" : len_reward
+        "cer": cer_reward_func,
+        "wer": wer_reward_func,
+        "exact": exact_match_reward_func,
+        "len": length_reward_func,
+        "norm_acc": vietnamese_normalized_reward_func, # (MỚI) Độ chính xác không dấu (Dễ hơn)
+        "word_contain": word_containment_reward_func,  # (MỚI) Từ có xuất hiện (Dễ nhất)
+        "diacritic": diacritic_check_reward_func, # (MỚI) Chuyên trị lỗi dấu
+        "vowel_tone": vowel_tone_reward_func, 
     }
-    reward_funcs = [reward_funcs_registry[func] for func in ["format",
-                                                             "soft_format_reward",
-                                                             "accuracy",
-                                                             "soft_format_reward",
-                                                             "xmlcount_reward",
-                                                             "soft_accuracy_reward"
-                                                            ]]
+
+    # Chọn danh sách reward để training
+    # CER là quan trọng nhất cho OCR, nên để nó gánh chính.
+    reward_funcs = [
+        reward_funcs_registry["cer"],    # Tính độ chính xác ký tự (quan trọng nhất)
+        reward_funcs_registry["wer"],    # Tính độ chính xác từ
+        reward_funcs_registry["exact"],  # Thưởng nếu đúng tuyệt đối
+        reward_funcs_registry["len"],     # Phạt nếu độ dài ảo giác
+        reward_funcs_registry["norm_acc"], 
+        reward_funcs_registry["word_contain"],
+        reward_funcs_registry["diacritic"],
+        reward_funcs_registry["vowel_tone"]   
+    ]
+
     training_args.reward_funcs =  reward_funcs
 
     training_args.use_vllm = True
     training_args.num_generations = 4
-    training_args.max_prompt_length = 1500
-    training_args.max_completion_length = 2000
+    training_args.max_prompt_length = 1200
+    training_args.max_completion_length = 1500
     training_args.beta = 0.04
     training_args.vllm_gpu_memory_utilization = 0.15
-    training_args.vllm_max_token = 1000
-    training_args.temperature = 0.7
+    training_args.vllm_max_token = 256
+    training_args.temperature = 0.8
     training_args.repetition_penalty = 1.0
     training_args.length_penalty = 1.0
     training_args.vllm_device = "auto" #"cuda:0"
     training_args.model_name_or_path = model_args.model_name_or_path
     training_args.max_grad_norm = 0.1 
-    training_args.epsilon_high = 0.2
-    training_args.epsilon_low = 0.2
+    training_args.epsilon_high = 0.3
+    training_args.epsilon_low = 0.3
     training_args.pad_token_id = tokenizer.encode(tokenizer.pad_token)[0] #151643
     training_args.ASSISTENT_TOKEN_ID = tokenizer.encode("assistant")[0] #77091
     training_args.eos_token_id = tokenizer.encode(tokenizer.eos_token)[0] #151643 #151645

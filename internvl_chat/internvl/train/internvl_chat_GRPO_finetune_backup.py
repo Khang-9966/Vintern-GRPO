@@ -49,7 +49,7 @@ from internvl.train.dataset import (ConcatDataset, TCSLoader,
                                     check_conversations_repetition,
                                     dynamic_preprocess, preprocess,
                                     preprocess_internlm,
-                                    preprocess_internvl2_5, preprocess_mpt,
+                                    preprocess_internvl2_5, preprocess_mpt,preprocess_internvl2_5_grpo,
                                     preprocess_phi3)
 from internvl.train.dataset_packed import PackedDataset, packed_collate_fn
 from PIL import Image, ImageFile, PngImagePlugin, UnidentifiedImageError
@@ -60,6 +60,9 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils.logging import (enable_default_handler,
                                         enable_explicit_format, set_verbosity)
+
+from internvl.train.trainer_grpo import MultimodalGRPOTrainer
+
 
 # Try to import petrel_client for image loading, fallback to PIL if unavailable
 try:
@@ -264,7 +267,50 @@ class DataTrainingArguments:
         default=False,
         metadata={'help': 'Whether to gather all during loss reduction. Default is False.'},
     )
-
+    # use_vllm: bool = field(
+    #     default=True,
+    #     metadata={'help': 'Whether to use vLLM for generation. Default is True.'},
+    # )
+    # num_generations: int = field(
+    #     default=4,
+    #     metadata={'help': 'Number of generations per prompt. Default is 4.'},
+    # )
+    # max_prompt_length: int = field(
+    #     default=500,
+    #     metadata={'help': 'Maximum length of the prompt. Default is 500.'},
+    # )
+    # max_completion_length: int = field(
+    #     default=1000,
+    #     metadata={'help': 'Maximum length of the completion. Default is 1000.'},
+    # )
+    # beta: float = field(
+    #     default=0.04,
+    #     metadata={'help': 'Beta value used in training or generation. Default is 0.04.'},
+    # )
+    # vllm_gpu_memory_utilization: float = field(
+    #     default=0.15,
+    #     metadata={'help': 'GPU memory utilization limit for vLLM. Default is 0.15.'},
+    # )
+    # vllm_max_token: int = field(
+    #     default=1000,
+    #     metadata={'help': 'Maximum number of tokens for vLLM. Default is 1000.'},
+    # )
+    # temperature: float = field(
+    #     default=0.5,
+    #     metadata={'help': 'Sampling temperature. Default is 0.5.'},
+    # )
+    # vllm_device: str = field(
+    #     default='auto',
+    #     metadata={'help': 'Device used for vLLM. Default is "auto".'},
+    # )
+    # epsilon_high: float = field(
+    #     default=0.2,
+    #     metadata={'help': 'High epsilon value for training strategy. Default is 0.2.'},
+    # )
+    # epsilon_low: float = field(
+    #     default=0.2,
+    #     metadata={'help': 'Low epsilon value for training strategy. Default is 0.2.'},
+    # )
 
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
@@ -299,6 +345,7 @@ class LazySupervisedDataset(Dataset):
         random_seed=0,
     ):
         super(LazySupervisedDataset, self).__init__()
+
         self.ds_name = ds_name
         self.tokenizer = tokenizer
         self.template_name = template_name
@@ -394,6 +441,8 @@ class LazySupervisedDataset(Dataset):
             preprocess_function = preprocess_phi3
         elif self.template_name == 'internvl2_5':
             preprocess_function = preprocess_internvl2_5
+        elif self.template_name == 'internvl2_5_grpo':
+            preprocess_function = preprocess_internvl2_5_grpo
         else:
             preprocess_function = preprocess
         return preprocess_function
@@ -418,6 +467,7 @@ class LazySupervisedDataset(Dataset):
         return transform
 
     def multi_modal_get_item(self, data_item):
+
         # Build transformation function
         transform = self.get_transform()
 
@@ -468,21 +518,27 @@ class LazySupervisedDataset(Dataset):
             attention_mask=ret['attention_mask'][0],
             position_ids=position_ids[0],
             pixel_values=pixel_values,
-            image_flags=torch.tensor([1] * num_patches, dtype=torch.long)
+            image_flags=[torch.tensor([1] * num_patches, dtype=torch.long),torch.tensor(np.array(image))],
+            PIL_image=image,
+            array_image=torch.tensor(np.array(image)),
+            text_query=data_item['conversations'][0]['value']
         )
         return ret
 
     def multi_modal_multi_image_get_item(self, data_item):
+
         # Build transformation function
         transform = self.get_transform()
 
         images, num_tiles = [], []
+        PIL_images = []
         num_image = len(data_item['image'])
         for image_path in data_item['image']:
             # Merge the image path
             image_path = self.get_image_path(image_path)
             # Load the image using tcs_loader if available, otherwise use PIL
             image = self.load_image(image_path)
+            PIL_images.append(image)
             if self.dynamic_image_size:  # If dynamic image size is enabled, preprocess the image dynamically
                 image = dynamic_preprocess(image, min_num=self.min_dynamic_patch,
                                            max_num=max(1, self.max_dynamic_patch // num_image),
@@ -518,7 +574,10 @@ class LazySupervisedDataset(Dataset):
             attention_mask=ret['attention_mask'][0],
             position_ids=position_ids[0],
             pixel_values=pixel_values,
-            image_flags=torch.tensor([1] * num_patches, dtype=torch.long)
+            image_flags=torch.tensor([1] * num_patches, dtype=torch.long),
+            PIL_image=PIL_images,
+            array_image=[torch.tensor(np.array(im)) for im in PIL_images],
+            text_query=data_item['conversations'][0]['value']
         )
         return ret
 
@@ -794,7 +853,259 @@ def len2weight(x, loss_reduction):
         return 1 / (x ** 0.5)
     raise NotImplementedError(loss_reduction)
 
+###########################################################################################################################################################
+import re
+def extract_xml_answer(text: str) -> str:
+    answer = text.split("<answer>")[-1]
+    answer = answer.split("</answer>")[0]
+    return answer.strip()
+    
+def accuracy_reward(completions, **kwargs):
+    print("***"*100)
+    print(completions)
+    solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
+    print("------------------> solution: ",solution)
+    contents = [completion for completion in completions]
+    rewards = []
 
+    for content, sol in zip(contents, solution):
+        # print(content)
+        reward = 0.0    
+        # If symbolic verification failed, try string matching
+        if reward == 0.0:
+            try:
+                # Extract answer from solution if it has think/answer tags
+                # sol_match = re.search(r'<answer>(.*?)</answer>', sol)
+                # if sol_match:
+                #     ground_truth = sol_match.group(1).strip()  #else sol.strip()
+                ground_truth = sol
+                # Extract answer from content if it has think/answer tags
+                content_match = None
+                content_match = re.search(r'<answer>(.*?)</answer>', content)
+
+                if content_match is not None:
+                    student_answer = content_match.group(1).strip() #else content.strip()
+                
+                    # Compare the extracted answers
+                    if student_answer == ground_truth:
+                        reward = 1.0
+            except Exception:
+                pass  # Keep reward as 0.0 if both methods fail
+
+        rewards.append(reward)
+
+    return rewards
+
+def soft_accuracy_reward(completions, **kwargs):
+    print("***"*100)
+    # print(completions)
+    solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
+    contents = [completion for completion in completions]
+    rewards = []
+
+    for content, sol in zip(contents, solution):
+        # print(content)
+        reward = 0.0    
+        # If symbolic verification failed, try string matching
+        if reward == 0.0:
+            try:
+                ground_truth = sol
+                if "Answer:" in content:
+                    ans =  content.split("Answer**:")[-1].repalce(" ","").repalce("\n","")
+                    print("="*10,soft_accuracy_reward,ans)
+                    if ans == ground_truth:
+                        reward = 1.0
+                elif "<answer>" in content:
+                    content_match = re.search(r'<answer>(.*?)</answer>', content)
+                    if content_match is not None:
+                        student_answer = content_match.group(1).strip() #else content.strip()
+                        # Compare the extracted answers
+                        if student_answer == ground_truth:
+                            reward = 1.0
+    
+            except Exception:
+                pass  # Keep reward as 0.0 if both methods fail
+
+        rewards.append(reward)
+
+    return rewards
+
+
+# def accuracy_reward(completions, **kwargs):
+#     print("***"*100)
+#     print(completions)
+#     solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
+#     print("------------------> solution: ",solution)
+#     contents = [completion for completion in completions]
+#     rewards = []
+
+#     for content, sol in zip(contents, solution):
+#         # print(content)
+#         reward = 0.0    
+#         # If symbolic verification failed, try string matching
+#         if reward == 0.0:
+#             try:
+#                 # Extract answer from solution if it has think/answer tags
+#                 # sol_match = re.search(r'<answer>(.*?)</answer>', sol)
+#                 # if sol_match:
+#                 #     ground_truth = sol_match.group(1).strip()  #else sol.strip()
+#                 ground_truth = sol
+#                 # Extract answer from content if it has think/answer tags
+#                 content_match = None
+#                 content_match = re.search(r'<answer>(.*?)</answer>', content)
+
+#                 if "text{" in content_match.group(1).strip():
+#                     content_match = re.search(r'text{(.*?)}', content_match.group(1).strip())
+#                     if content_match is not None:
+#                         student_answer = content_match.group(1).strip() #else content.strip()
+#                 elif "boxed{" in content_match.group(1).strip():
+#                     content_match = re.search(r'boxed{(.*?)}', content_match.group(1).strip())
+#                     if content_match is not None:
+#                         student_answer = content_match.group(1).strip() #else content.strip()
+                            
+#                     # Compare the extracted answers
+#                     if student_answer == ground_truth:
+#                         reward = 1.0
+#             except Exception:
+#                 pass  # Keep reward as 0.0 if both methods fail
+
+#         rewards.append(reward)
+
+#     return rewards
+
+# def soft_accuracy_reward(completions, **kwargs):
+#     print("***"*100)
+#     solution =  [ extract_xml_answer(prompt) for prompt in kwargs["prompts"]]
+#     contents = [completion for completion in completions]
+#     rewards = []
+
+#     for content, sol in zip(contents, solution):
+#         # print(content)
+#         reward = 0.0    
+#         # If symbolic verification failed, try string matching
+#         if reward == 0.0:
+#             try:
+#                 ground_truth = sol
+#                 if "Answer:" in content:
+#                     ans =  content.split("Answer:")[-1].repalce(" ","").repalce("\n","")
+#                     print("="*10,soft_accuracy_reward,ans)
+#                     if ans == ground_truth:
+#                         reward = 1.0
+#                 elif "text{" in content:
+#                     content_match = re.search(r'text{(.*?)}', content)
+#                     if content_match is not None:
+#                         student_answer = content_match.group(1).strip() #else content.strip()
+#                         # Compare the extracted answers
+#                         if student_answer == ground_truth:
+#                             reward = 1.0
+#                 elif "boxed{" in content:
+#                     content_match = re.search(r'boxed{(.*?)}', content)
+#                     if content_match is not None:
+#                         student_answer = content_match.group(1).strip() #else content.strip()
+#                         # Compare the extracted answers
+#                         if student_answer == ground_truth:
+#                             reward = 1.0
+    
+#             except Exception:
+#                 pass  # Keep reward as 0.0 if both methods fail
+
+#         rewards.append(reward)
+
+#     return rewards
+    
+def count_xml(text) -> float:
+    count = 0.0
+    if text.count("<reasoning>") == 1:
+        count += 0.125
+    if text.count("</reasoning>") == 1:
+        count += 0.125
+    if text.count("<answer>") == 1:
+        count += 0.125
+        count -= len(text.split("</answer>")[-1])*0.001
+    if text.count("</answer>") == 1:
+        count += 0.125
+        count -= (len(text.split("</answer>")[-1]) - 1)*0.001
+    return count
+
+def xmlcount_reward_func(completions, **kwargs) -> list[float]:
+    contents = [completion for completion in completions]
+    return [count_xml(c) for c in contents]
+
+def format_reward(completions, **kwargs):
+    pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
+    completion_contents = [completion for completion in completions]
+    matches = [re.fullmatch(pattern, content, re.DOTALL) for content in completion_contents]
+    return [1.0 if match else 0.0 for match in matches]
+
+def soft_format_reward(completions, **kwargs):
+    rewards = []
+    for completion in completions:
+        score = 0.0
+        if re.search(r"<reasoning>.*?</reasoning>", completion, re.DOTALL):
+            score += 0.5
+        if re.search(r"<answer>.*?</answer>", completion, re.DOTALL):
+            score += 0.5
+        rewards.append(score)
+    return rewards
+
+def len_reward(completions, **kwargs):
+    rewards = []
+    for completion in completions:
+        score = 0.5
+        # Count number of words
+        word_count = len(completion.split())
+        if word_count > 600:
+            excess = word_count - 600
+            penalty = (excess // 100) * 0.1
+            score -= penalty
+            score = max(score,-0.5)
+        rewards.append(score)
+    return rewards
+    
+def count_math_operations(text) -> float:
+    pattern = re.compile(r'[-+*/]')
+    count = 0
+    for match in pattern.finditer(text):
+        op_index = match.start()
+        
+        # Tìm ký tự không phải khoảng trắng bên trái
+        left = None
+        i = op_index - 1
+        while i >= 0:
+            if not text[i].isspace():
+                left = text[i]
+                break
+            i -= 1
+        
+        # Tìm ký tự không phải khoảng trắng bên phải
+        right = None
+        i = match.end()
+        while i < len(text):
+            if not text[i].isspace():
+                right = text[i]
+                break
+            i += 1
+        
+        # Nếu ít nhất một bên là số thì đếm phép toán này
+        if (left is not None and left.isdigit()) or (right is not None and right.isdigit()):
+            count += 1
+    
+    if count == 0:
+        return 0.0  # Không có phép toán nào
+    elif count == 5:
+        return 0.25  # Một phép toán
+    elif count == 10:
+        return 0.5  # Hai phép toán
+    elif count == 15:
+        return 0.75  # Ba phép toán
+    elif count <= 20:
+        return 1.0  # Thưởng tối đa nếu dưới hoặc bằng 20 phép toán
+    else:
+        return max(-1.0, 1.0 - (count - 20) * 0.1)  # Phạt khi trên 20 phép toán
+
+def math_reward_func(completions, **kwargs) -> list[float]:
+    return [count_math_operations(c) for c in completions]
+    
 def main():
     # Apply necessary patches for the transformers library
     replace_llama_rmsnorm_with_fused_rmsnorm()
@@ -1026,6 +1337,7 @@ def main():
     # set seed for torch dataloaders
     set_seed(training_args.seed)
 
+
     if data_args.use_packed_ds:
         collator = partial(
             packed_collate_fn,
@@ -1037,8 +1349,47 @@ def main():
         )
     else:
         collator = concat_pad_data_collator
+        
+    
+    reward_funcs_registry = {
+        "accuracy": accuracy_reward,
+        "format": format_reward,
+        "xmlcount_reward": xmlcount_reward_func,
+        "math_reward": math_reward_func,
+        "soft_accuracy_reward": soft_accuracy_reward,
+        "soft_format_reward": soft_format_reward,
+        "len_reward" : len_reward
+    }
+    reward_funcs = [reward_funcs_registry[func] for func in ["format",
+                                                             "soft_format_reward",
+                                                             "accuracy",
+                                                             "soft_format_reward",
+                                                             "xmlcount_reward",
+                                                             "soft_accuracy_reward"
+                                                            ]]
+    training_args.reward_funcs =  reward_funcs
 
-    trainer = Trainer(
+    training_args.use_vllm = True
+    training_args.num_generations = 4
+    training_args.max_prompt_length = 1500
+    training_args.max_completion_length = 2000
+    training_args.beta = 0.04
+    training_args.vllm_gpu_memory_utilization = 0.15
+    training_args.vllm_max_token = 800
+    training_args.temperature = 1.0
+    training_args.repetition_penalty = 1.0
+    training_args.length_penalty = 1.0
+    training_args.vllm_device = "auto" #"cuda:0"
+    training_args.model_name_or_path = model_args.model_name_or_path
+    training_args.max_grad_norm = 0.1 
+    training_args.epsilon_high = 0.3
+    training_args.epsilon_low = 0.3
+    training_args.pad_token_id = tokenizer.encode(tokenizer.pad_token)[0] #151643
+    training_args.ASSISTENT_TOKEN_ID = tokenizer.encode("assistant")[0] #77091
+    training_args.eos_token_id = tokenizer.encode(tokenizer.eos_token)[0] #151643 #151645
+    training_args.lr_scheduler_kwargs = {"min_lr_rate":0.1}
+    ######################################################################################################################################################################
+    trainer = MultimodalGRPOTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
